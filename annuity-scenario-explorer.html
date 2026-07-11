@@ -108,6 +108,9 @@
   .steps td { padding: 7px 8px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
   .steps tr:last-child td { border-bottom: none; }
   .warn { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--amber); border-radius: 0 10px 10px 0; padding: 12px 16px; font-size: 13px; color: var(--text-2); margin-top: 4px; }
+  .drawdown-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 10px; }
+  .drawdown-stats .stat { background: var(--surface-2, rgba(128,128,128,.08)); border-radius: 8px; padding: 10px 12px; font-size: 12px; color: var(--text-3); }
+  .drawdown-stats .stat strong { display: block; font-size: 17px; color: var(--text); margin-top: 2px; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -159,6 +162,17 @@
       </div>
       <hr class="divider">
       <div class="ctl">
+        <div class="ctl-head"><label for="incomeIndexRet">5-yr index return during income</label><output id="incomeIndexRetOut"></output></div>
+        <input type="range" id="incomeIndexRet" min="0" max="60" step="1" value="30">
+        <div class="hint">Index assumption for the payout phase (can differ from accumulation).</div>
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label for="incomeMult">Income multiplier</label><output id="incomeMultOut"></output></div>
+        <input type="range" id="incomeMult" min="1" max="3" step="0.1" value="1.5">
+        <div class="hint" id="incomeStepHint"></div>
+      </div>
+      <hr class="divider">
+      <div class="ctl">
         <div class="ctl-head"><label for="cashRate">Cash value growth (est. /yr)</label><output id="cashRateOut"></output></div>
         <input type="range" id="cashRate" min="0" max="6" step="0.25" value="3">
       </div>
@@ -171,6 +185,11 @@
       <div class="ctl" id="marketCtl">
         <div class="ctl-head"><label for="marketRet">Direct investment return /yr</label><output id="marketRetOut"></output></div>
         <input type="range" id="marketRet" min="0" max="12" step="0.25" value="7">
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label for="planEndAge">Plan to age</label><output id="planEndAgeOut"></output></div>
+        <input type="range" id="planEndAge" min="75" max="110" step="1" value="90">
+        <div class="hint">Payout chart runs from income start to this age. The annuity pays to age 110.</div>
       </div>
     </div>
 
@@ -202,6 +221,14 @@
       </div>
 
       <div class="chart-box">
+        <h3>After income starts: annuity income vs brokerage drawdown</h3>
+        <p class="note" id="drawdownNote"></p>
+        <div class="drawdown-stats" id="drawdownStats"></div>
+        <div class="legend" id="drawdownLegend"></div>
+        <div class="canvas-wrap"><canvas id="drawdownChart"></canvas></div>
+      </div>
+
+      <div class="chart-box">
         <h3>PIV step-up schedule</h3>
         <table class="steps">
           <thead><tr><th>Age</th><th>Event</th><th>PIV</th></tr></thead>
@@ -218,7 +245,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const sliders = ['premium','startAge','incomeAge','boost','indexRet','partRate','wdRate','cashRate','marketRet'];
+const sliders = ['premium','startAge','incomeAge','boost','indexRet','partRate','wdRate','incomeIndexRet','incomeMult','cashRate','marketRet','planEndAge'];
 const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
 const C = {
   blue: isDark ? '#3987e5' : '#2a78d6',
@@ -244,9 +271,12 @@ function getParams() {
     indexRet: +$('indexRet').value / 100,
     partRate: +$('partRate').value,
     wdRate: +$('wdRate').value / 100,
+    incomeIndexRet: +$('incomeIndexRet').value / 100,
+    incomeMult: +$('incomeMult').value,
     cashRate: +$('cashRate').value / 100,
     marketRet: +$('marketRet').value / 100,
-    showMarket: $('showMarket').checked
+    showMarket: $('showMarket').checked,
+    planEndAge: +$('planEndAge').value
   };
 }
 
@@ -268,8 +298,41 @@ function simulate(p) {
   return { ages, piv, cash, market, income, mktBal, mktIncome, stepUp, years, pivFinal: pivVal };
 }
 
+// Payout phase: annuity income steps up every completed 5 years
+// (Income_Interest = payout-phase 5yr pt-to-pt x income multiplier),
+// paid to age 110. Brokerage: 4% rule withdrawals, remainder compounds.
+function simulateDrawdown(p, s) {
+  const ANNUITY_END_AGE = 110;
+  const incomeStep = p.incomeIndexRet * p.incomeMult;
+  const wdAnnual = s.mktBal * 0.04;
+  const ages = [], annIncome = [], annCumulative = [], brokerageBal = [];
+  let income = s.income, annTotal = 0, bal = s.mktBal, depleteAge = null;
+
+  for (let age = p.incomeAge; age <= p.planEndAge; age++) {
+    const t = age - p.incomeAge;
+    if (t > 0 && t % 5 === 0 && age <= ANNUITY_END_AGE) income = income * (1 + incomeStep);
+    const paid = age <= ANNUITY_END_AGE ? income : 0;
+    ages.push(age);
+    annIncome.push(paid);
+    annTotal += paid;
+    annCumulative.push(annTotal);
+    brokerageBal.push(bal);
+    if (age < p.planEndAge) {
+      bal = (bal - wdAnnual) * (1 + p.marketRet);
+      if (bal <= 0) { bal = 0; if (depleteAge === null) depleteAge = age + 1; }
+    }
+  }
+
+  return {
+    ages, annIncome, annCumulative, brokerageBal, wdAnnual, incomeStep,
+    incomeFinal: annIncome[annIncome.length - 1], annTotal, depleteAge,
+    finalBal: brokerageBal[brokerageBal.length - 1],
+    brkTotal: wdAnnual * (p.planEndAge - p.incomeAge + 1)
+  };
+}
+
 let pinned = null;
-let mainChart, incomeChart;
+let mainChart, incomeChart, drawdownChart;
 
 function buildLegend(p) {
   const items = [
@@ -285,6 +348,7 @@ function buildLegend(p) {
 function render() {
   const p = getParams();
   if (p.incomeAge <= p.startAge) { $('incomeAge').value = p.startAge + 5; return render(); }
+  if (p.planEndAge <= p.incomeAge) { $('planEndAge').value = Math.min(p.incomeAge + 5, 110); return render(); }
   const s = simulate(p);
 
   $('premiumOut').textContent = fmtMoney(p.premium);
@@ -294,6 +358,10 @@ function render() {
   $('indexRetOut').textContent = Math.round(p.indexRet*100) + '%';
   $('partRateOut').textContent = p.partRate.toFixed(1) + '×';
   $('wdRateOut').textContent = (p.wdRate*100).toFixed(1) + '%';
+  $('incomeIndexRetOut').textContent = Math.round(p.incomeIndexRet*100) + '%';
+  $('incomeMultOut').textContent = p.incomeMult.toFixed(1) + '×';
+  $('incomeStepHint').textContent = 'Income step-up per 5 yrs: ' + Math.round(p.incomeIndexRet*100) + '% × ' + p.incomeMult.toFixed(1) + ' = ' + (p.incomeIndexRet*p.incomeMult*100).toFixed(0) + '%';
+  $('planEndAgeOut').textContent = p.planEndAge;
   $('cashRateOut').textContent = (p.cashRate*100).toFixed(2).replace(/\.?0+$/,'') + '%';
   $('marketRetOut').textContent = (p.marketRet*100).toFixed(2).replace(/\.?0+$/,'') + '%';
   $('marketCtl').style.display = p.showMarket ? '' : 'none';
@@ -369,6 +437,58 @@ function render() {
     }
   });
 
+  const d = simulateDrawdown(p, s);
+
+  $('drawdownNote').textContent =
+    'Annuity: starts at ' + fmtMoney(s.income) + '/yr, steps up ' + (d.incomeStep*100).toFixed(0) +
+    '% every completed 5 yrs (' + Math.round(p.incomeIndexRet*100) + '% × ' + p.incomeMult.toFixed(1) +
+    '), pays to age 110. Brokerage: 4% rule (' + fmtMoney(d.wdAnnual) + '/yr) from the balance at ' + p.incomeAge +
+    ', remainder grows at ' + (p.marketRet*100).toFixed(1).replace(/\.0$/,'') + '%/yr.' +
+    (d.depleteAge ? ' Brokerage hits $0 at age ' + d.depleteAge + '.' : '');
+
+  $('drawdownStats').innerHTML = [
+    ['Annuity income at ' + p.incomeAge, fmtMoney(s.income) + '/yr'],
+    ['Annuity income at ' + p.planEndAge, fmtMoney(d.incomeFinal) + '/yr'],
+    ['Annuity total received', fmtMoney(d.annTotal)],
+    ['Brokerage income /yr', fmtMoney(d.wdAnnual)],
+    ['Brokerage left at ' + p.planEndAge, fmtMoney(d.finalBal)]
+  ].map(([lbl, val]) => `<div class="stat">${lbl}<strong>${val}</strong></div>`).join('');
+
+  $('drawdownLegend').innerHTML = [
+    ['Annuity income /yr', C.blue],
+    ['Annuity cumulative received', C.ghost],
+    ['Brokerage balance remaining', C.teal]
+  ].map(([l,c]) => `<span><span class="sw" style="background:${c}"></span>${l}</span>`).join('');
+
+  if (drawdownChart) drawdownChart.destroy();
+  drawdownChart = new Chart($('drawdownChart'), {
+    type: 'line',
+    data: {
+      labels: d.ages,
+      datasets: [
+        { label: 'Annuity income /yr', data: d.annIncome, borderColor: C.blue, stepped: true, borderWidth: 2.5, pointRadius: 0, yAxisID: 'yIncome', order: 1 },
+        { label: 'Annuity cumulative', data: d.annCumulative, borderColor: C.ghost, borderDash: [8,4], borderWidth: 2, pointRadius: 0, yAxisID: 'yBal', order: 3 },
+        { label: 'Brokerage balance', data: d.brokerageBal, borderColor: C.teal, borderDash: [2,3], borderWidth: 2.5, pointRadius: 0, yAxisID: 'yBal', order: 2 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 200 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: items => 'Age ' + items[0].label,
+          label: c => c.dataset.label + ': ' + fmtMoneyFull(c.parsed.y) + (c.dataset.yAxisID === 'yIncome' ? '/yr' : '')
+        }}
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: C.tick, maxTicksLimit: 14 } },
+        yIncome: { position: 'left', title: { display: true, text: 'Income /yr', color: C.tick, font: { size: 11 } }, grid: { color: C.grid }, ticks: { color: C.tick, callback: v => fmtMoney(v) } },
+        yBal: { position: 'right', title: { display: true, text: 'Balance / cumulative', color: C.tick, font: { size: 11 } }, grid: { display: false }, ticks: { color: C.tick, callback: v => fmtMoney(v) } }
+      }
+    }
+  });
+
   let rows = `<tr><td>${p.startAge}</td><td>Premium ${fmtMoney(p.premium)} + ${Math.round(p.boost*100)}% boost</td><td><strong>${fmtMoney(p.premium*(1+p.boost))}</strong></td></tr>`;
   let v = p.premium * (1 + p.boost);
   for (let i = 1; i <= fullPeriods; i++) {
@@ -380,10 +500,10 @@ function render() {
 }
 
 const presets = {
-  pitch:    { indexRet: 32, partRate: 2.5 },
-  moderate: { indexRet: 20, partRate: 2.5 },
-  weak:     { indexRet: 10, partRate: 2.5 },
-  reset:    { premium: 500000, startAge: 50, incomeAge: 65, boost: 25, indexRet: 32, partRate: 2.5, wdRate: 4.3, cashRate: 3, marketRet: 7 }
+  pitch:    { indexRet: 32, partRate: 2.5, incomeIndexRet: 30 },
+  moderate: { indexRet: 20, partRate: 2.5, incomeIndexRet: 20 },
+  weak:     { indexRet: 10, partRate: 2.5, incomeIndexRet: 10 },
+  reset:    { premium: 500000, startAge: 50, incomeAge: 65, boost: 25, indexRet: 32, partRate: 2.5, wdRate: 4.3, incomeIndexRet: 30, incomeMult: 1.5, cashRate: 3, marketRet: 7, planEndAge: 90 }
 };
 
 document.querySelectorAll('#presets button').forEach(btn => {
