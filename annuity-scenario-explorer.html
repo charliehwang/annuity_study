@@ -111,6 +111,18 @@
   .drawdown-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 10px; }
   .drawdown-stats .stat { background: var(--surface-2, rgba(128,128,128,.08)); border-radius: 8px; padding: 10px 12px; font-size: 12px; color: var(--text-3); }
   .drawdown-stats .stat strong { display: block; font-size: 17px; color: var(--text); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    font: inherit; font-size: 13.5px; padding: 8px 16px; cursor: pointer;
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--text-3); margin-bottom: -1px;
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.active { color: var(--text); font-weight: 600; border-bottom-color: var(--blue); }
+  #compareTable th:not(:first-child), #compareTable td:not(:first-child) { text-align: right; }
+  #compareTable tfoot td { font-weight: 600; border-top: 2px solid var(--border-strong); border-bottom: none; }
+  .diff-pos { color: var(--teal); }
+  .diff-neg { color: var(--red); }
 </style>
 </head>
 <body>
@@ -125,6 +137,30 @@
     <button data-preset="reset">Reset defaults</button>
   </div>
 
+  <div class="tabs" id="tabs">
+    <button data-tab="main" class="active">Explorer</button>
+    <button data-tab="compare">Income comparison</button>
+  </div>
+
+  <div id="page-compare" style="display:none">
+    <div class="chart-box">
+      <h3>Year-by-year income: annuity vs direct investment</h3>
+      <p class="note" id="compareNote"></p>
+      <table class="steps" id="compareTable">
+        <thead><tr><th>Age</th><th>Annuity income</th><th>Market income (4% rule)</th><th>Difference</th></tr></thead>
+        <tbody id="compareBody"></tbody>
+        <tfoot id="compareFoot"></tfoot>
+      </table>
+    </div>
+
+    <div class="chart-box">
+      <h3>Leftover wealth at plan end</h3>
+      <p class="note" id="wealthNote"></p>
+      <div class="drawdown-stats" id="wealthStats"></div>
+    </div>
+  </div>
+
+  <div id="page-main">
   <div class="layout">
     <div class="panel">
       <h2>Assumptions</h2>
@@ -240,6 +276,7 @@
         <strong>Remember:</strong> the PIV is a bookkeeping number used only to set your income — you can never withdraw it as a lump sum. Walk-away money is the cash value. Participation/multiplier rates are often renewable by the carrier, so long projections at today's rates are optimistic. This tool illustrates mechanics; it isn't financial advice.
       </div>
     </div>
+  </div>
   </div>
 </div>
 
@@ -489,6 +526,8 @@ function render() {
     }
   });
 
+  renderCompare(p, s, d);
+
   let rows = `<tr><td>${p.startAge}</td><td>Premium ${fmtMoney(p.premium)} + ${Math.round(p.boost*100)}% boost</td><td><strong>${fmtMoney(p.premium*(1+p.boost))}</strong></td></tr>`;
   let v = p.premium * (1 + p.boost);
   for (let i = 1; i <= fullPeriods; i++) {
@@ -498,6 +537,50 @@ function render() {
   rows += `<tr><td>${p.incomeAge}</td><td>Income begins: ${fmtMoney(v)} × ${(p.wdRate*100).toFixed(1)}%</td><td><strong>${fmtMoney(s.income)}/yr</strong></td></tr>`;
   $('stepsBody').innerHTML = rows;
 }
+
+// Second tab: year-by-year income table plus terminal-wealth comparison.
+// Side fund = spend the same as the market income, invest the annuity surplus
+// (annuity income minus market income) each year at the market return.
+function renderCompare(p, s, d) {
+  let totAnn = 0, totMkt = 0, sideFund = 0, rows = '';
+  for (let i = 0; i < d.ages.length; i++) {
+    const ann = d.annIncome[i], mkt = d.wdAnnual, diff = ann - mkt;
+    totAnn += ann; totMkt += mkt;
+    sideFund = sideFund * (1 + p.marketRet) + diff;
+    rows += `<tr><td>${d.ages[i]}</td><td>${fmtMoneyFull(ann)}</td><td>${fmtMoneyFull(mkt)}</td>` +
+      `<td class="${diff >= 0 ? 'diff-pos' : 'diff-neg'}">${diff >= 0 ? '+' : '−'}${fmtMoneyFull(Math.abs(diff))}</td></tr>`;
+  }
+  $('compareBody').innerHTML = rows;
+  const totDiff = totAnn - totMkt;
+  $('compareFoot').innerHTML =
+    `<tr><td>Total</td><td>${fmtMoneyFull(totAnn)}</td><td>${fmtMoneyFull(totMkt)}</td>` +
+    `<td class="${totDiff >= 0 ? 'diff-pos' : 'diff-neg'}">${totDiff >= 0 ? '+' : '−'}${fmtMoneyFull(Math.abs(totDiff))}</td></tr>`;
+
+  $('compareNote').textContent =
+    'Ages ' + p.incomeAge + '–' + p.planEndAge + '. Annuity income steps up ' + (d.incomeStep*100).toFixed(0) +
+    '% every completed 5 yrs. Market income is a constant 4% of the ' + fmtMoney(s.mktBal) +
+    ' balance at ' + p.incomeAge + ' (' + fmtMoney(d.wdAnnual) + '/yr).';
+
+  const delta = sideFund - d.finalBal;
+  $('wealthNote').textContent =
+    'Both paths spend the same ' + fmtMoney(d.wdAnnual) + '/yr. Market path: the brokerage balance keeps compounding at ' +
+    (p.marketRet*100).toFixed(1).replace(/\.0$/,'') + '%/yr after withdrawals. Annuity path: the income difference is invested each year at the same ' +
+    (p.marketRet*100).toFixed(1).replace(/\.0$/,'') + '%/yr.';
+  $('wealthStats').innerHTML = [
+    ['Market: brokerage left at ' + p.planEndAge, fmtMoney(d.finalBal)],
+    ['Annuity: side fund at ' + p.planEndAge, fmtMoney(sideFund)],
+    [delta >= 0 ? 'Annuity path ahead by' : 'Market path ahead by', fmtMoney(Math.abs(delta))]
+  ].map(([lbl, val]) => `<div class="stat">${lbl}<strong>${val}</strong></div>`).join('');
+}
+
+document.querySelectorAll('#tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b === btn));
+    $('page-main').style.display = btn.dataset.tab === 'main' ? '' : 'none';
+    $('page-compare').style.display = btn.dataset.tab === 'compare' ? '' : 'none';
+    if (btn.dataset.tab === 'main') render();
+  });
+});
 
 const presets = {
   pitch:    { indexRet: 32, partRate: 2.5, incomeIndexRet: 30 },
