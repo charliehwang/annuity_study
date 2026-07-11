@@ -146,6 +146,12 @@
     <div class="chart-box">
       <h3>Year-by-year income: annuity vs direct investment</h3>
       <p class="note" id="compareNote"></p>
+      <div class="legend" id="compareLegend"></div>
+      <div class="canvas-wrap"><canvas id="compareChart"></canvas></div>
+    </div>
+
+    <div class="chart-box">
+      <h3>Income table</h3>
       <table class="steps" id="compareTable">
         <thead><tr><th>Age</th><th>Annuity income</th><th>Market income (4% rule)</th><th>Difference</th></tr></thead>
         <tbody id="compareBody"></tbody>
@@ -199,12 +205,12 @@
       <hr class="divider">
       <div class="ctl">
         <div class="ctl-head"><label for="incomeIndexRet">5-yr index return during income</label><output id="incomeIndexRetOut"></output></div>
-        <input type="range" id="incomeIndexRet" min="0" max="60" step="1" value="30">
+        <input type="range" id="incomeIndexRet" min="0" max="60" step="1" value="40">
         <div class="hint">Index assumption for the payout phase (can differ from accumulation).</div>
       </div>
       <div class="ctl">
         <div class="ctl-head"><label for="incomeMult">Income multiplier</label><output id="incomeMultOut"></output></div>
-        <input type="range" id="incomeMult" min="1" max="3" step="0.1" value="1.5">
+        <input type="range" id="incomeMult" min="1" max="3" step="0.1" value="1.0">
         <div class="hint" id="incomeStepHint"></div>
       </div>
       <hr class="divider">
@@ -220,7 +226,7 @@
       </div>
       <div class="ctl" id="marketCtl">
         <div class="ctl-head"><label for="marketRet">Direct investment return /yr</label><output id="marketRetOut"></output></div>
-        <input type="range" id="marketRet" min="0" max="12" step="0.25" value="7">
+        <input type="range" id="marketRet" min="0" max="12" step="0.25" value="10">
       </div>
       <div class="ctl">
         <div class="ctl-head"><label for="planEndAge">Plan to age</label><output id="planEndAgeOut"></output></div>
@@ -369,7 +375,7 @@ function simulateDrawdown(p, s) {
 }
 
 let pinned = null;
-let mainChart, incomeChart, drawdownChart;
+let mainChart, incomeChart, drawdownChart, compareChart;
 
 function buildLegend(p) {
   const items = [
@@ -543,14 +549,51 @@ function render() {
 // (annuity income minus market income) each year at the market return.
 function renderCompare(p, s, d) {
   let totAnn = 0, totMkt = 0, sideFund = 0, rows = '';
+  const mkts = [], diffs = [];
   for (let i = 0; i < d.ages.length; i++) {
     const ann = d.annIncome[i], mkt = d.wdAnnual, diff = ann - mkt;
     totAnn += ann; totMkt += mkt;
+    mkts.push(mkt); diffs.push(diff);
     sideFund = sideFund * (1 + p.marketRet) + diff;
     rows += `<tr><td>${d.ages[i]}</td><td>${fmtMoneyFull(ann)}</td><td>${fmtMoneyFull(mkt)}</td>` +
       `<td class="${diff >= 0 ? 'diff-pos' : 'diff-neg'}">${diff >= 0 ? '+' : '−'}${fmtMoneyFull(Math.abs(diff))}</td></tr>`;
   }
   $('compareBody').innerHTML = rows;
+
+  $('compareLegend').innerHTML = [
+    ['Annuity income /yr', C.blue],
+    ['Market income /yr', C.teal],
+    ['Difference (bars)', C.ghost]
+  ].map(([l,c]) => `<span><span class="sw" style="background:${c}"></span>${l}</span>`).join('');
+
+  const diffColors = diffs.map(v => v >= 0 ? (isDark ? 'rgba(51,192,147,.35)' : 'rgba(29,158,117,.3)') : (isDark ? 'rgba(230,103,103,.4)' : 'rgba(208,59,59,.35)'));
+  if (compareChart) compareChart.destroy();
+  compareChart = new Chart($('compareChart'), {
+    type: 'bar',
+    data: {
+      labels: d.ages,
+      datasets: [
+        { type: 'line', label: 'Annuity income', data: d.annIncome, borderColor: C.blue, stepped: true, borderWidth: 2.5, pointRadius: 0, order: 1 },
+        { type: 'line', label: 'Market income', data: mkts, borderColor: C.teal, borderDash: [6,4], borderWidth: 2, pointRadius: 0, order: 2 },
+        { type: 'bar', label: 'Difference', data: diffs, backgroundColor: diffColors, borderRadius: 2, order: 3 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 200 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: items => 'Age ' + items[0].label,
+          label: c => c.dataset.label + ': ' + (c.dataset.label === 'Difference' && c.parsed.y < 0 ? '−' : '') + fmtMoneyFull(Math.abs(c.parsed.y)) + '/yr'
+        }}
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: C.tick, maxTicksLimit: 14 } },
+        y: { grid: { color: C.grid }, ticks: { color: C.tick, callback: v => fmtMoney(v) } }
+      }
+    }
+  });
   const totDiff = totAnn - totMkt;
   $('compareFoot').innerHTML =
     `<tr><td>Total</td><td>${fmtMoneyFull(totAnn)}</td><td>${fmtMoneyFull(totMkt)}</td>` +
@@ -578,15 +621,15 @@ document.querySelectorAll('#tabs button').forEach(btn => {
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b === btn));
     $('page-main').style.display = btn.dataset.tab === 'main' ? '' : 'none';
     $('page-compare').style.display = btn.dataset.tab === 'compare' ? '' : 'none';
-    if (btn.dataset.tab === 'main') render();
+    render();
   });
 });
 
 const presets = {
-  pitch:    { indexRet: 32, partRate: 2.5, incomeIndexRet: 30 },
+  pitch:    { indexRet: 32, partRate: 2.5, incomeIndexRet: 40 },
   moderate: { indexRet: 20, partRate: 2.5, incomeIndexRet: 20 },
   weak:     { indexRet: 10, partRate: 2.5, incomeIndexRet: 10 },
-  reset:    { premium: 500000, startAge: 50, incomeAge: 65, boost: 25, indexRet: 32, partRate: 2.5, wdRate: 4.3, incomeIndexRet: 30, incomeMult: 1.5, cashRate: 3, marketRet: 7, planEndAge: 90 }
+  reset:    { premium: 500000, startAge: 50, incomeAge: 65, boost: 25, indexRet: 32, partRate: 2.5, wdRate: 4.3, incomeIndexRet: 40, incomeMult: 1.0, cashRate: 3, marketRet: 10, planEndAge: 90 }
 };
 
 document.querySelectorAll('#presets button').forEach(btn => {
