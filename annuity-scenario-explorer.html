@@ -205,12 +205,12 @@
       <hr class="divider">
       <div class="ctl">
         <div class="ctl-head"><label for="incomeIndexRet">5-yr index return during income</label><output id="incomeIndexRetOut"></output></div>
-        <input type="range" id="incomeIndexRet" min="0" max="60" step="1" value="40">
+        <input type="range" id="incomeIndexRet" min="0" max="60" step="1" value="27">
         <div class="hint">Index assumption for the payout phase (can differ from accumulation).</div>
       </div>
       <div class="ctl">
         <div class="ctl-head"><label for="incomeMult">Income multiplier</label><output id="incomeMultOut"></output></div>
-        <input type="range" id="incomeMult" min="1" max="3" step="0.1" value="1.0">
+        <input type="range" id="incomeMult" min="1" max="3" step="0.1" value="1.5">
         <div class="hint" id="incomeStepHint"></div>
       </div>
       <hr class="divider">
@@ -343,34 +343,34 @@ function simulate(p) {
 
 // Payout phase: annuity income steps up every completed 5 years
 // (Income_Interest = payout-phase 5yr pt-to-pt x income multiplier),
-// paid to age 110. Brokerage: 4% rule withdrawals, remainder compounds.
+// paid to age 110. Brokerage: withdraw 4% of the current balance each
+// year, so market income moves with the account.
 function simulateDrawdown(p, s) {
   const ANNUITY_END_AGE = 110;
   const incomeStep = p.incomeIndexRet * p.incomeMult;
-  const wdAnnual = s.mktBal * 0.04;
-  const ages = [], annIncome = [], annCumulative = [], brokerageBal = [];
-  let income = s.income, annTotal = 0, bal = s.mktBal, depleteAge = null;
+  const ages = [], annIncome = [], annCumulative = [], brokerageBal = [], mktIncome = [];
+  let income = s.income, annTotal = 0, bal = s.mktBal, mktTotal = 0;
 
   for (let age = p.incomeAge; age <= p.planEndAge; age++) {
     const t = age - p.incomeAge;
     if (t > 0 && t % 5 === 0 && age <= ANNUITY_END_AGE) income = income * (1 + incomeStep);
     const paid = age <= ANNUITY_END_AGE ? income : 0;
+    const wd = bal * 0.04;
     ages.push(age);
     annIncome.push(paid);
     annTotal += paid;
     annCumulative.push(annTotal);
     brokerageBal.push(bal);
-    if (age < p.planEndAge) {
-      bal = (bal - wdAnnual) * (1 + p.marketRet);
-      if (bal <= 0) { bal = 0; if (depleteAge === null) depleteAge = age + 1; }
-    }
+    mktIncome.push(wd);
+    mktTotal += wd;
+    if (age < p.planEndAge) bal = (bal - wd) * (1 + p.marketRet);
   }
 
   return {
-    ages, annIncome, annCumulative, brokerageBal, wdAnnual, incomeStep,
-    incomeFinal: annIncome[annIncome.length - 1], annTotal, depleteAge,
-    finalBal: brokerageBal[brokerageBal.length - 1],
-    brkTotal: wdAnnual * (p.planEndAge - p.incomeAge + 1)
+    ages, annIncome, annCumulative, brokerageBal, mktIncome, mktTotal, incomeStep,
+    incomeFinal: annIncome[annIncome.length - 1], annTotal,
+    mktIncomeFirst: mktIncome[0], mktIncomeFinal: mktIncome[mktIncome.length - 1],
+    finalBal: brokerageBal[brokerageBal.length - 1]
   };
 }
 
@@ -485,22 +485,23 @@ function render() {
   $('drawdownNote').textContent =
     'Annuity: starts at ' + fmtMoney(s.income) + '/yr, steps up ' + (d.incomeStep*100).toFixed(0) +
     '% every completed 5 yrs (' + Math.round(p.incomeIndexRet*100) + '% × ' + p.incomeMult.toFixed(1) +
-    '), pays to age 110. Brokerage: 4% rule (' + fmtMoney(d.wdAnnual) + '/yr) from the balance at ' + p.incomeAge +
-    ', remainder grows at ' + (p.marketRet*100).toFixed(1).replace(/\.0$/,'') + '%/yr.' +
-    (d.depleteAge ? ' Brokerage hits $0 at age ' + d.depleteAge + '.' : '');
+    '), pays to age 110. Brokerage: withdraw 4% of the current balance each year (starts at ' + fmtMoney(d.mktIncomeFirst) +
+    '/yr), remainder grows at ' + (p.marketRet*100).toFixed(1).replace(/\.0$/,'') + '%/yr.';
 
   $('drawdownStats').innerHTML = [
     ['Annuity income at ' + p.incomeAge, fmtMoney(s.income) + '/yr'],
     ['Annuity income at ' + p.planEndAge, fmtMoney(d.incomeFinal) + '/yr'],
     ['Annuity total received', fmtMoney(d.annTotal)],
-    ['Brokerage income /yr', fmtMoney(d.wdAnnual)],
+    ['Brokerage income at ' + p.incomeAge, fmtMoney(d.mktIncomeFirst) + '/yr'],
+    ['Brokerage income at ' + p.planEndAge, fmtMoney(d.mktIncomeFinal) + '/yr'],
     ['Brokerage left at ' + p.planEndAge, fmtMoney(d.finalBal)]
   ].map(([lbl, val]) => `<div class="stat">${lbl}<strong>${val}</strong></div>`).join('');
 
   $('drawdownLegend').innerHTML = [
     ['Annuity income /yr', C.blue],
+    ['Brokerage income /yr (4% of balance)', C.teal],
     ['Annuity cumulative received', C.ghost],
-    ['Brokerage balance remaining', C.teal]
+    ['Brokerage balance remaining', C.gray]
   ].map(([l,c]) => `<span><span class="sw" style="background:${c}"></span>${l}</span>`).join('');
 
   if (drawdownChart) drawdownChart.destroy();
@@ -510,8 +511,9 @@ function render() {
       labels: d.ages,
       datasets: [
         { label: 'Annuity income /yr', data: d.annIncome, borderColor: C.blue, stepped: true, borderWidth: 2.5, pointRadius: 0, yAxisID: 'yIncome', order: 1 },
-        { label: 'Annuity cumulative', data: d.annCumulative, borderColor: C.ghost, borderDash: [8,4], borderWidth: 2, pointRadius: 0, yAxisID: 'yBal', order: 3 },
-        { label: 'Brokerage balance', data: d.brokerageBal, borderColor: C.teal, borderDash: [2,3], borderWidth: 2.5, pointRadius: 0, yAxisID: 'yBal', order: 2 }
+        { label: 'Brokerage income /yr', data: d.mktIncome, borderColor: C.teal, borderWidth: 2, pointRadius: 0, yAxisID: 'yIncome', order: 2 },
+        { label: 'Annuity cumulative', data: d.annCumulative, borderColor: C.ghost, borderDash: [8,4], borderWidth: 2, pointRadius: 0, yAxisID: 'yBal', order: 4 },
+        { label: 'Brokerage balance', data: d.brokerageBal, borderColor: C.gray, borderDash: [2,3], borderWidth: 2.5, pointRadius: 0, yAxisID: 'yBal', order: 3 }
       ]
     },
     options: {
@@ -551,7 +553,7 @@ function renderCompare(p, s, d) {
   let totAnn = 0, totMkt = 0, sideFund = 0, rows = '';
   const mkts = [], diffs = [];
   for (let i = 0; i < d.ages.length; i++) {
-    const ann = d.annIncome[i], mkt = d.wdAnnual, diff = ann - mkt;
+    const ann = d.annIncome[i], mkt = d.mktIncome[i], diff = ann - mkt;
     totAnn += ann; totMkt += mkt;
     mkts.push(mkt); diffs.push(diff);
     sideFund = sideFund * (1 + p.marketRet) + diff;
@@ -601,12 +603,12 @@ function renderCompare(p, s, d) {
 
   $('compareNote').textContent =
     'Ages ' + p.incomeAge + '–' + p.planEndAge + '. Annuity income steps up ' + (d.incomeStep*100).toFixed(0) +
-    '% every completed 5 yrs. Market income is a constant 4% of the ' + fmtMoney(s.mktBal) +
-    ' balance at ' + p.incomeAge + ' (' + fmtMoney(d.wdAnnual) + '/yr).';
+    '% every completed 5 yrs. Market income is 4% of the brokerage balance each year, so it grows with the account (starts at ' +
+    fmtMoney(d.mktIncomeFirst) + '/yr from a ' + fmtMoney(s.mktBal) + ' balance).';
 
   const delta = sideFund - d.finalBal;
   $('wealthNote').textContent =
-    'Both paths spend the same ' + fmtMoney(d.wdAnnual) + '/yr. Market path: the brokerage balance keeps compounding at ' +
+    'Both paths spend the market income each year (4% of the evolving balance). Market path: the brokerage balance keeps compounding at ' +
     (p.marketRet*100).toFixed(1).replace(/\.0$/,'') + '%/yr after withdrawals. Annuity path: the income difference is invested each year at the same ' +
     (p.marketRet*100).toFixed(1).replace(/\.0$/,'') + '%/yr.';
   $('wealthStats').innerHTML = [
@@ -626,10 +628,10 @@ document.querySelectorAll('#tabs button').forEach(btn => {
 });
 
 const presets = {
-  pitch:    { indexRet: 32, partRate: 2.5, incomeIndexRet: 40 },
+  pitch:    { indexRet: 32, partRate: 2.5, incomeIndexRet: 27 },
   moderate: { indexRet: 20, partRate: 2.5, incomeIndexRet: 20 },
   weak:     { indexRet: 10, partRate: 2.5, incomeIndexRet: 10 },
-  reset:    { premium: 500000, startAge: 50, incomeAge: 65, boost: 25, indexRet: 32, partRate: 2.5, wdRate: 4.3, incomeIndexRet: 40, incomeMult: 1.0, cashRate: 3, marketRet: 10, planEndAge: 90 }
+  reset:    { premium: 500000, startAge: 50, incomeAge: 65, boost: 25, indexRet: 32, partRate: 2.5, wdRate: 4.3, incomeIndexRet: 27, incomeMult: 1.5, cashRate: 3, marketRet: 10, planEndAge: 90 }
 };
 
 document.querySelectorAll('#presets button').forEach(btn => {
